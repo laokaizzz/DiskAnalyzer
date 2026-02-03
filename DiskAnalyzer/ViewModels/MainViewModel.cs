@@ -18,13 +18,18 @@ namespace DiskAnalyzer.ViewModels
     public class MainViewModel : ObservableObject
     {
         private readonly DiskScanner _scanner;
+        private readonly ConfigService _configService;
         private CancellationTokenSource _cts;
         private List<FileItem> _allResults;
         
         private ObservableCollection<FileItem> _filteredResults;
+        private ObservableCollection<DriveInfo> _drives;
+        private DriveInfo _selectedDrive;
         private bool _isScanning;
         private bool _isPaused;
         private string _currentPath;
+        private string _selectedPath;
+        private string _errorMessage;
         private double _sizeThresholdMB = 100;
         private bool _showUnsafe = true;
         private bool _showSafe = true;
@@ -33,6 +38,7 @@ namespace DiskAnalyzer.ViewModels
 
         public MainViewModel()
         {
+            _configService = new ConfigService();
             _scanner = new DiskScanner();
             _scanner.CurrentPathChanged += (path) => 
             {
@@ -47,6 +53,45 @@ namespace DiskAnalyzer.ViewModels
             CancelScanCommand = new RelayCommand(CancelScan);
             DeleteCommand = new RelayCommand<object>(DeleteSelected);
             ExportCommand = new RelayCommand(ExportData);
+            SelectDirectoryCommand = new RelayCommand(SelectDirectory);
+
+            LoadDrives();
+            
+            // Initialize with saved path or default to C:\
+            SelectedPath = _configService.Config.LastSelectedPath;
+            if (string.IsNullOrEmpty(SelectedPath)) SelectedPath = "C:\\";
+        }
+
+        public void SetInitialPath(string path)
+        {
+            if (!string.IsNullOrWhiteSpace(path))
+            {
+                SelectedPath = path;
+            }
+        }
+
+        public ObservableCollection<DriveInfo> Drives
+        {
+            get => _drives;
+            set => SetProperty(ref _drives, value);
+        }
+
+        public DriveInfo SelectedDrive
+        {
+            get => _selectedDrive;
+            set
+            {
+                if (SetProperty(ref _selectedDrive, value) && value != null)
+                {
+                    SelectedPath = value.RootDirectory.FullName;
+                }
+            }
+        }
+
+        public string ErrorMessage
+        {
+            get => _errorMessage;
+            set => SetProperty(ref _errorMessage, value);
         }
 
         public ObservableCollection<FileItem> FilteredResults
@@ -83,6 +128,18 @@ namespace DiskAnalyzer.ViewModels
         {
             get => _currentPath;
             set => SetProperty(ref _currentPath, value);
+        }
+
+        public string SelectedPath
+        {
+            get => _selectedPath;
+            set
+            {
+                if (SetProperty(ref _selectedPath, value))
+                {
+                    ValidatePath(value);
+                }
+            }
         }
 
         public double SizeThresholdMB
@@ -141,10 +198,20 @@ namespace DiskAnalyzer.ViewModels
         public IRelayCommand CancelScanCommand { get; }
         public IRelayCommand<object> DeleteCommand { get; }
         public IRelayCommand ExportCommand { get; }
+        public IRelayCommand SelectDirectoryCommand { get; }
 
         private async Task StartScan()
         {
             if (IsScanning) return;
+            if (!ValidatePath(SelectedPath)) 
+            {
+                MessageBox.Show(ErrorMessage, "Invalid Path", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+
+            // Save config
+            _configService.Config.LastSelectedPath = SelectedPath;
+            _configService.Save();
 
             IsScanning = true;
             IsPaused = false;
@@ -154,7 +221,7 @@ namespace DiskAnalyzer.ViewModels
 
             try
             {
-                var paths = new[] { "C:\\" }; 
+                var paths = new[] { SelectedPath }; 
                 long thresholdBytes = (long)(SizeThresholdMB * 1024 * 1024);
                 
                 var results = await _scanner.ScanAsync(paths, thresholdBytes, _cts.Token);
@@ -195,6 +262,73 @@ namespace DiskAnalyzer.ViewModels
         private void CancelScan()
         {
             _cts?.Cancel();
+        }
+
+        private void SelectDirectory()
+        {
+            using (var dialog = new System.Windows.Forms.FolderBrowserDialog())
+            {
+                dialog.Description = "请选择要扫描的目录或磁盘";
+                dialog.ShowNewFolderButton = false;
+                if (!string.IsNullOrEmpty(SelectedPath) && Directory.Exists(SelectedPath))
+                {
+                    dialog.SelectedPath = SelectedPath;
+                }
+
+                System.Windows.Forms.DialogResult result = dialog.ShowDialog();
+                if (result == System.Windows.Forms.DialogResult.OK && !string.IsNullOrWhiteSpace(dialog.SelectedPath))
+                {
+                    SelectedPath = dialog.SelectedPath;
+                }
+            }
+        }
+
+        private void LoadDrives()
+        {
+            try
+            {
+                var drives = DriveInfo.GetDrives().Where(d => d.IsReady).ToList();
+                Drives = new ObservableCollection<DriveInfo>(drives);
+            }
+            catch (Exception ex)
+            {
+                ErrorMessage = "Failed to load drives: " + ex.Message;
+            }
+        }
+
+        private bool ValidatePath(string path)
+        {
+            ErrorMessage = string.Empty;
+
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                ErrorMessage = "路径不能为空";
+                return false;
+            }
+
+            if (!Directory.Exists(path))
+            {
+                ErrorMessage = "路径不存在或不可访问";
+                return false;
+            }
+
+            try
+            {
+                // Check read permission by trying to get files (top directory only)
+                Directory.GetFiles(path).FirstOrDefault();
+            }
+            catch (UnauthorizedAccessException)
+            {
+                ErrorMessage = "没有访问该目录的权限";
+                return false;
+            }
+            catch (Exception ex)
+            {
+                ErrorMessage = $"访问路径错误: {ex.Message}";
+                return false;
+            }
+
+            return true;
         }
 
         private void ApplyFilters()
